@@ -1,0 +1,120 @@
+# otelcol-k8s.yaml — the in-cluster twin of deploy/docker/otelcol-docker.yaml
+# (see data-plane/config/otelcol-dev.yaml for the full pipeline commentary).
+# Identical pipeline topology; only the deployment-specific knobs are
+# templated: control-plane endpoints resolve the Kubernetes Service name,
+# and fleet credentials / intervals / log verbosity come from values.yaml.
+#
+# The collector Deployment mounts this at /etc/otelcol/otelcol-k8s.yaml
+# (shadowing the image's baked-in localhost dev config) and stamps a
+# checksum of it on the pod template, so `helm upgrade` with a changed
+# config rolls the collector pods automatically.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-collector-config
+  labels:
+    app.kubernetes.io/name: pulse-collector
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "pulse-telemetry.labels" . | nindent 4 }}
+data:
+  otelcol-k8s.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      pulse_filter:
+        log_span_details: {{ .Values.collector.logSpanDetails }}
+        sync_endpoint: {{ include "pulse-telemetry.controlPlaneUrl" . }}/api/v1/policies/{{ .Values.fleet.id }}
+        sync_interval: {{ .Values.fleet.syncInterval }}
+        stats_endpoint: {{ include "pulse-telemetry.controlPlaneUrl" . }}/api/v1/telemetry/{{ .Values.fleet.id }}/stats
+        stats_interval: {{ .Values.fleet.statsInterval }}
+        fleet_key: {{ .Values.fleet.key }}
+
+    connectors:
+      routing/traces:
+        default_pipelines: [traces/hot]
+        table:
+          - context: resource
+            condition: attributes["pulse.routing.destination"] == "cold-storage"
+            pipelines: [traces/cold]
+      routing/logs:
+        default_pipelines: [logs/hot]
+        table:
+          - context: resource
+            condition: attributes["pulse.routing.destination"] == "cold-storage"
+            pipelines: [logs/cold]
+      routing/metrics:
+        default_pipelines: [metrics/hot]
+        table:
+          - context: resource
+            condition: attributes["pulse.routing.destination"] == "cold-storage"
+            pipelines: [metrics/cold]
+
+    exporters:
+      debug/hot:
+        verbosity: basic
+      debug/cold:
+        verbosity: basic
+
+    service:
+      telemetry:
+        logs:
+          level: {{ .Values.collector.telemetryLogLevel }}
+        metrics:
+          # Self-monitoring endpoint scraped by the ServiceMonitor (see
+          # templates/servicemonitor.yaml): Prometheus text format on
+          # 0.0.0.0:{{ .Values.metrics.port }}/metrics — 0.0.0.0, not the collector's localhost
+          # default, because Prometheus scrapes over the pod network. Serves
+          # the stock otelcol_* process/pipeline metrics plus the
+          # otelcol_pulse_filter_* instruments (rules, per-signal
+          # received/dropped). The without_* flags pin the classic collector
+          # metric names — no _total/unit suffixes — which the bundled
+          # Grafana dashboard (files/pulse-collector-dashboard.json)
+          # addresses verbatim.
+          level: normal
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: {{ .Values.metrics.port }}
+                    without_scope_info: true
+                    without_type_suffix: true
+                    without_units: true
+      pipelines:
+        traces/in:
+          receivers: [otlp]
+          processors: [pulse_filter]
+          exporters: [routing/traces]
+        logs/in:
+          receivers: [otlp]
+          processors: [pulse_filter]
+          exporters: [routing/logs]
+        metrics/in:
+          receivers: [otlp]
+          processors: [pulse_filter]
+          exporters: [routing/metrics]
+
+        traces/hot:
+          receivers: [routing/traces]
+          exporters: [debug/hot]
+        traces/cold:
+          receivers: [routing/traces]
+          exporters: [debug/cold]
+        logs/hot:
+          receivers: [routing/logs]
+          exporters: [debug/hot]
+        logs/cold:
+          receivers: [routing/logs]
+          exporters: [debug/cold]
+        metrics/hot:
+          receivers: [routing/metrics]
+          exporters: [debug/hot]
+        metrics/cold:
+          receivers: [routing/metrics]
+          exporters: [debug/cold]

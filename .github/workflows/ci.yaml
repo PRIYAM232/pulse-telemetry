@@ -1,0 +1,158 @@
+# Pulse CI — validation for pull requests and pushes to main.
+#
+# Five independent jobs, one per surface:
+#   data-plane      — race-enabled unit tests for the pulse_filter engine
+#   collector-build — assembles the otelcol-pulse distro with ocb, proving
+#                     builder-config.yaml and the processor still compose
+#   control-plane   — ESLint + Prisma schema validation
+#   helm            — chart lint + a full render with the Phase 10
+#                     monitoring toggles on, so gated templates can't rot
+#   image-scan      — builds the three release images and fails on CRITICAL
+#                     CVEs (Trivy), so a vulnerable base never reaches a tag
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Must match the collector line in data-plane/builder-config.yaml and the
+  # Makefile's OCB_VERSION.
+  OCB_VERSION: v0.156.0
+
+jobs:
+  data-plane:
+    name: Data plane (go test -race)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: data-plane/processors/filterprocessor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: data-plane/processors/filterprocessor/go.sum
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: go test -race ./...
+
+  collector-build:
+    name: Collector distro (ocb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: data-plane/processors/filterprocessor/go.sum
+      - name: Install OpenTelemetry Collector Builder
+        run: go install go.opentelemetry.io/collector/cmd/builder@${{ env.OCB_VERSION }}
+      - name: Assemble otelcol-pulse
+        working-directory: data-plane
+        run: builder --config builder-config.yaml
+
+  control-plane:
+    name: Control plane (lint + Prisma)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-plane
+    env:
+      # prisma.config.ts resolves DATABASE_URL at load time; nothing connects
+      # during validate, so any well-formed URL satisfies it (same trick as
+      # the Dockerfile's build stage).
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: control-plane/package-lock.json
+      - run: npm ci
+      - name: ESLint
+        run: npm run lint
+      - name: Prisma schema validation
+        run: npx prisma validate
+      - name: Prisma client generates cleanly
+        run: npx prisma generate
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: helm lint
+        run: helm lint deploy/helm/pulse-telemetry
+      - name: Render with self-monitoring enabled
+        run: >
+          helm template pulse deploy/helm/pulse-telemetry
+          --set metrics.serviceMonitor.enabled=true
+          --set metrics.dashboard.enabled=true
+          > /dev/null
+
+  image-scan:
+    name: ${{ matrix.image }} CVE scan (Trivy)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Same matrix as release.yaml's `images` job — the scan must cover
+      # exactly what a release would ship.
+      matrix:
+        include:
+          - image: control-plane
+            context: control-plane
+            dockerfile: control-plane/Dockerfile
+            target: runner
+          - image: control-plane-migrate
+            context: control-plane
+            dockerfile: control-plane/Dockerfile
+            target: builder
+          - image: otelcol-pulse
+            # The collector Dockerfile copies data-plane/ from the repo root.
+            context: .
+            dockerfile: deploy/docker/Dockerfile.collector
+            target: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Same cache scopes as release.yaml, so a green scan here also primes
+      # the layer cache the release build will reuse.
+      - name: Build image locally
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          push: false
+          load: true
+          tags: pulse-ci/${{ matrix.image }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+      # Pinned to the v0.36.0 commit SHA, not the tag: trivy-action's mutable
+      # tags (0.0.1–0.34.2) were compromised via imposter commits in March
+      # 2026. SHA pins are immutable; bump them deliberately.
+      - name: Fail on CRITICAL CVEs
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: pulse-ci/${{ matrix.image }}:${{ github.sha }}
+          format: table
+          # CVE gate only. Trivy's secret scanner would flag the deterministic
+          # dev fleet key baked into the collector's default config.
+          scanners: vuln
+          severity: CRITICAL
+          # Unfixed CRITICALs fail too (no ignore-unfixed): a base image with
+          # no patched package yet still blocks until we swap the base or
+          # explicitly .trivyignore it with a rationale.
+          exit-code: "1"

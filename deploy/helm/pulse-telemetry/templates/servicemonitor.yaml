@@ -1,0 +1,34 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+# Prometheus Operator scrape config for the collector's self-telemetry.
+# Prometheus matches this ServiceMonitor's selector against SERVICES, then
+# scrapes every endpoint behind the matched Service — so all collector
+# replicas are scraped individually on the named `metrics` port (:8888),
+# each series labelled with its pod. Gated because the CRD only exists on
+# clusters running the Prometheus Operator (kube-prometheus-stack et al.).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-collector
+  labels:
+    app.kubernetes.io/name: pulse-collector
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+    {{- include "pulse-telemetry.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pulse-collector
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: collector
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}

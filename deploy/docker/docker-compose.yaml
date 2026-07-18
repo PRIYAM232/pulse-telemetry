@@ -1,0 +1,89 @@
+# The full V1 Pulse stack: PostgreSQL, the Next.js control plane, and the
+# otelcol-pulse collector, wired together on the compose network.
+# From the repo root:
+#   Full stack:     docker compose -f deploy/docker/docker-compose.yaml up --build
+#   Postgres only:  docker compose -f deploy/docker/docker-compose.yaml up -d postgres
+#
+# Startup order is enforced end to end: postgres (healthy) → one-shot
+# migrate+seed → control plane (healthy) → collector. The migrator runs the
+# Dockerfile's BUILDER stage — the only image with the Prisma CLI — so the
+# control plane's runtime image stays the bare standalone server.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulse-postgres
+    environment:
+      POSTGRES_USER: pulse
+      POSTGRES_PASSWORD: pulse
+      POSTGRES_DB: pulse_control
+    ports:
+      - "5432:5432"
+    volumes:
+      - pulse-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulse -d pulse_control"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: applies pending migrations, then seeds the deterministic dev
+  # fleet (the collector config's fleet ID/key come from that seed). Exits 0
+  # and stays exited; `restart: no` keeps compose from resurrecting it.
+  control-plane-migrate:
+    build:
+      context: ../../control-plane
+      target: builder
+    container_name: pulse-control-plane-migrate
+    environment:
+      DATABASE_URL: postgresql://pulse:pulse@postgres:5432/pulse_control?schema=public
+    command: sh -c "npx prisma migrate deploy && npx prisma db seed"
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  control-plane:
+    build:
+      context: ../../control-plane
+      target: runner
+    container_name: pulse-control-plane
+    environment:
+      DATABASE_URL: postgresql://pulse:pulse@postgres:5432/pulse_control?schema=public
+    ports:
+      - "3000:3000" # dashboard + policy/stats APIs
+    depends_on:
+      control-plane-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # node is the only runtime in the image; fetch the dashboard root
+      # rather than assuming curl/wget exist.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  otelcol-pulse:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.collector
+    container_name: otelcol-pulse
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    volumes:
+      # In-network config (control-plane endpoints); live-editable without a
+      # rebuild. The image itself bakes the localhost dev config as a default.
+      - ./otelcol-docker.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+volumes:
+  pulse-pgdata:

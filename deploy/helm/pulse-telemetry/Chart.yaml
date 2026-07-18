@@ -1,0 +1,9 @@
+# Pulse Phase 9 — the docker-compose stack (deploy/docker) translated into a
+# Helm release: postgres (StatefulSet) → prisma migrate+seed (hook Job) →
+# control plane (Deployment) → collector (Deployment, horizontally scalable).
+apiVersion: v2
+name: pulse-telemetry
+description: Pulse observability proxy — OTel collector data plane, Next.js control plane, and PostgreSQL
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

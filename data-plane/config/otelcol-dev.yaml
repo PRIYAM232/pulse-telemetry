@@ -1,0 +1,140 @@
+# Local development pipeline for the otelcol-pulse distribution.
+#
+# Phase 7 topology — Dynamic Routing & Exporter Multiplexing:
+#
+#   otlp ─► pulse_filter ─► routing/<signal> ─► debug/cold   (tagged cold-storage)
+#            (tags with                     └─► debug/hot    (everything else)
+#             pulse.routing.destination)
+#
+# pulse_filter ROUTE rules stamp matching telemetry's RESOURCE with
+# pulse.routing.destination = <targetDestination>; the native routing
+# CONNECTOR (the successor to the removed `routing` processor) evaluates that
+# attribute at resource level — keeping batches intact — and forks each
+# resource group into the hot or cold pipeline.
+#
+# Traces, logs, and metrics share the one pulse_filter instance: the processor
+# keys its control-plane engine by component ID, so all three ingest pipelines
+# are served by a single policy poller and a single combined heartbeat. The
+# routing connectors are per-signal only because each route table must name
+# pipelines of its own signal type.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  pulse_filter:
+    # Per-span logging is for local development only — it walks every span.
+    log_span_details: true
+    # Control-plane sync. Fleet ID and key below are the deterministic LOCAL
+    # DEV values provisioned by control-plane/prisma/seed.ts — rotate for any
+    # real deployment. When the collector runs inside Docker, replace
+    # localhost with host.docker.internal.
+    sync_endpoint: http://localhost:3000/api/v1/policies/f1ee7000-0000-4000-8000-000000000001
+    # 10s is aggressive on purpose so local rule edits show up fast; the
+    # production default is 30s.
+    sync_interval: 10s
+    # Heartbeat: received/dropped span counts POSTed every stats_interval.
+    # Feeds the FleetMetric table behind the /dashboard savings banner.
+    stats_endpoint: http://localhost:3000/api/v1/telemetry/f1ee7000-0000-4000-8000-000000000001/stats
+    stats_interval: 10s
+    fleet_key: pulse_dev_sk_2f7d1b9c4e8a4f60b3d5a9c1e6f80712
+
+connectors:
+  # One route table per signal: a connector's table may only reference
+  # pipelines of the signal it is bridging. The condition key must match
+  # attrRoutingDestination in the Go processor
+  # (data-plane/processors/filterprocessor/rules.go) — that constant is the
+  # contract between pulse_filter and this table. Untagged resources (no
+  # ROUTE rule matched) fall through to the default hot pipeline.
+  routing/traces:
+    default_pipelines: [traces/hot]
+    table:
+      - context: resource
+        condition: attributes["pulse.routing.destination"] == "cold-storage"
+        pipelines: [traces/cold]
+  routing/logs:
+    default_pipelines: [logs/hot]
+    table:
+      - context: resource
+        condition: attributes["pulse.routing.destination"] == "cold-storage"
+        pipelines: [logs/cold]
+  routing/metrics:
+    default_pipelines: [metrics/hot]
+    table:
+      - context: resource
+        condition: attributes["pulse.routing.destination"] == "cold-storage"
+        pipelines: [metrics/cold]
+
+exporters:
+  # Two mock destinations to prove the fork. Log lines carry the exporter
+  # name (debug/hot vs debug/cold), which is how the multiplexing is verified.
+  debug/hot:
+    # `detailed` prints full bodies; drop to `basic` once output gets noisy.
+    verbosity: detailed
+  debug/cold:
+    verbosity: detailed
+
+service:
+  telemetry:
+    logs:
+      # pulse_filter emits its batch/span observations at debug level.
+      level: debug
+    metrics:
+      # Self-monitoring scrape endpoint: Prometheus text format at
+      # http://127.0.0.1:8888/metrics — stock otelcol_* process/pipeline
+      # metrics plus the otelcol_pulse_filter_* instruments registered in
+      # data-plane/processors/filterprocessor/telemetry.go. The without_*
+      # flags pin the classic collector metric names (no _total / unit
+      # suffixes, no otel_scope_info series), so dashboards can address
+      # e.g. otelcol_pulse_filter_spans_received verbatim. Loopback binding
+      # for dev; the k8s chart binds 0.0.0.0 so Prometheus can reach it.
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
+                without_scope_info: true
+                without_type_suffix: true
+                without_units: true
+  pipelines:
+    # Ingest: receive, filter/tag, hand to the routing connector (used here
+    # as an EXPORTER — that is how connectors bridge pipelines).
+    traces/in:
+      receivers: [otlp]
+      processors: [pulse_filter]
+      exporters: [routing/traces]
+    logs/in:
+      receivers: [otlp]
+      processors: [pulse_filter]
+      exporters: [routing/logs]
+    metrics/in:
+      receivers: [otlp]
+      processors: [pulse_filter]
+      exporters: [routing/metrics]
+
+    # Fork targets: the routing connector is their RECEIVER.
+    traces/hot:
+      receivers: [routing/traces]
+      exporters: [debug/hot]
+    traces/cold:
+      receivers: [routing/traces]
+      exporters: [debug/cold]
+    logs/hot:
+      receivers: [routing/logs]
+      exporters: [debug/hot]
+    logs/cold:
+      receivers: [routing/logs]
+      exporters: [debug/cold]
+    metrics/hot:
+      receivers: [routing/metrics]
+      exporters: [debug/hot]
+    metrics/cold:
+      receivers: [routing/metrics]
+      exporters: [debug/cold]

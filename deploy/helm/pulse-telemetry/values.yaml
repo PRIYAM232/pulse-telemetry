@@ -1,0 +1,138 @@
+# Default values for pulse-telemetry.
+#
+# Image defaults are the local dev tags produced by the repo's Docker builds
+# (see deploy/helm/pulse-telemetry/README.md for the build + `kind load`
+# commands). Nothing here is published to a registry — pullPolicy stays
+# IfNotPresent so kind/minikube use the pre-loaded images.
+#
+# Resource names are derived from the release name: install as `pulse` and
+# you get pulse-control-plane, pulse-collector, pulse-postgres — the DNS
+# names baked into the collector config.
+
+controlPlane:
+  image:
+    repository: pulse/control-plane
+    tag: dev
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    port: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+migrator:
+  # The control-plane Dockerfile's `builder` stage — the only image carrying
+  # the Prisma CLI plus schema, migrations, and the seed script. Runs as a
+  # one-shot hook Job (see templates/migration-job.yaml).
+  image:
+    repository: pulse/control-plane-migrate
+    tag: dev
+    pullPolicy: IfNotPresent
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  # `prisma db seed` provisions the deterministic dev fleet that fleet.id /
+  # fleet.key below point at. The seed is idempotent for the dev fleet;
+  # disable once real fleets are provisioned through the dashboard.
+  seed: true
+
+collector:
+  # The horizontally scalable data plane. An edge proxy, not a node agent —
+  # Deployment, not DaemonSet. Raise replicas as telemetry volume grows.
+  image:
+    repository: pulse/otelcol-pulse
+    tag: dev
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    # ClusterIP serves in-cluster telemetry producers; switch to LoadBalancer
+    # to expose OTLP 4317/4318 to producers outside the cluster.
+    type: ClusterIP
+  # pulse_filter emits its batch observations at debug level; raise to info
+  # to quiet the collector once the stack is verified.
+  telemetryLogLevel: debug
+  # Per-span walks don't belong in a packaged run (same stance as V1's
+  # otelcol-docker.yaml).
+  logSpanDetails: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+metrics:
+  # Phase 10 self-monitoring. The collector ALWAYS serves its own metrics
+  # (Prometheus text format at /metrics) on this port — stock otelcol_*
+  # process/pipeline metrics plus the otelcol_pulse_filter_* rules/throughput
+  # instruments. The two blocks below only control how the surrounding
+  # monitoring stack discovers them; both default off so the chart keeps
+  # installing on clusters without the Prometheus Operator CRDs or Grafana.
+  port: 8888
+
+  serviceMonitor:
+    # Deploys a monitoring.coreos.com/v1 ServiceMonitor targeting the
+    # collector Service's `metrics` port. Requires the Prometheus Operator
+    # CRDs (e.g. kube-prometheus-stack) — installing with this enabled on a
+    # cluster without them fails at apply time.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels for Prometheus instance selection — kube-prometheus-stack
+    # defaults to serviceMonitorSelector matching `release: <its release>`,
+    # e.g.:  additionalLabels: { release: kube-prometheus-stack }
+    additionalLabels: {}
+
+  dashboard:
+    # Ships the pre-built Grafana dashboard as a ConfigMap labelled
+    # grafana_dashboard: "1" so Grafana's dashboard sidecar auto-imports it.
+    enabled: false
+    # Namespace to create the ConfigMap in when the sidecar only watches its
+    # own namespace (searchNamespace). Empty → the release namespace.
+    namespace: ""
+    additionalLabels: {}
+    # Sidecar folder routing, e.g.: annotations: { grafana_folder: Pulse }
+    annotations: {}
+
+fleet:
+  # Deterministic LOCAL DEV fleet provisioned by the migrator's seed step —
+  # rotate both values for any real deployment.
+  id: f1ee7000-0000-4000-8000-000000000001
+  key: pulse_dev_sk_2f7d1b9c4e8a4f60b3d5a9c1e6f80712
+  syncInterval: 10s
+  statsInterval: 10s
+
+postgres:
+  # Self-contained in-cluster Postgres for the local/kind stack. In a real
+  # environment use RDS/Cloud SQL instead: set enabled: false and point
+  # database.externalUrl at the managed instance.
+  enabled: true
+  image:
+    repository: postgres
+    tag: 16-alpine
+    pullPolicy: IfNotPresent
+  auth:
+    username: pulse
+    password: pulse
+    database: pulse_control
+  storage:
+    size: 1Gi
+    # Empty string → the cluster's default StorageClass (kind and minikube
+    # both ship a dynamic local-path provisioner).
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+database:
+  # Full connection URL for an external/managed database, e.g.
+  # postgresql://user:pass@my-rds:5432/pulse_control?schema=public
+  # When set, it overrides the in-chart postgres wiring everywhere
+  # (secret, migration job, control plane).
+  externalUrl: ""

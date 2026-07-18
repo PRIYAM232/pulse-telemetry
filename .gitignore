@@ -1,0 +1,31 @@
+# ocb build output (generated sources + compiled binary)
+data-plane/dist/
+
+# Go
+*.test
+*.out
+
+# Node / Next.js (control plane)
+node_modules/
+.next/
+out/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor noise
+.DS_Store
+
+# Internal working documents — not part of the open-source release
+/claude_prompt.md
+/MultiLLM_AI_Workflow.md
+/prompt
+/*.pages
+
+# Claude Code personal settings (launch.json stays shared)
+.claude/settings.local.json
+
+# Helm packaging output (release workflow)
+/dist/

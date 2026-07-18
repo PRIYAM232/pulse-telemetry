@@ -1,0 +1,31 @@
+Pulse telemetry stack installed as release "{{ .Release.Name }}".
+
+Startup order (mirrors the compose stack): postgres → migrate+seed (hook
+Job, first install runs it post-install) → control plane → collector.
+
+Watch it come up:
+  kubectl -n {{ .Release.Namespace }} get pods -w
+
+Migration + seed output:
+  kubectl -n {{ .Release.Namespace }} logs job/{{ .Release.Name }}-migrate
+
+Dashboard (policy/stats APIs on the same port):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Release.Name }}-control-plane {{ .Values.controlPlane.service.port }}:{{ .Values.controlPlane.service.port }}
+  open http://localhost:{{ .Values.controlPlane.service.port }}/dashboard
+
+Send OTLP telemetry (in-cluster endpoints):
+  grpc: {{ .Release.Name }}-collector.{{ .Release.Namespace }}.svc:4317
+  http: {{ .Release.Name }}-collector.{{ .Release.Namespace }}.svc:4318
+
+Smoke test from your machine:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Release.Name }}-collector 4318:4318
+  # then POST a span to http://localhost:4318/v1/traces and watch:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ .Release.Name }}-collector -f
+
+Scale the data plane:
+  helm upgrade {{ .Release.Name }} deploy/helm/pulse-telemetry -n {{ .Release.Namespace }} --reuse-values --set collector.replicas=3
+{{- if .Values.fleet.key | hasPrefix "pulse_dev_sk_" }}
+
+NOTE: this release uses the deterministic LOCAL DEV fleet credentials
+provisioned by the seed. Rotate fleet.id / fleet.key for any real deployment.
+{{- end }}

@@ -1,0 +1,93 @@
+# Collector config for the docker-compose stack — the in-network twin of
+# data-plane/config/otelcol-dev.yaml (see that file for the full pipeline
+# commentary). Differences, on purpose:
+#   - Control-plane endpoints resolve the compose service name
+#     (control-plane:3000) instead of localhost.
+#   - log_span_details stays off: batch-level debug logging is enough to
+#     verify the stack, and per-span walks don't belong in the packaged run.
+# Fleet ID and key are the deterministic LOCAL DEV values provisioned by the
+# control-plane-migrate one-shot (prisma db seed) — rotate for any real
+# deployment.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  pulse_filter:
+    log_span_details: false
+    sync_endpoint: http://control-plane:3000/api/v1/policies/f1ee7000-0000-4000-8000-000000000001
+    sync_interval: 10s
+    stats_endpoint: http://control-plane:3000/api/v1/telemetry/f1ee7000-0000-4000-8000-000000000001/stats
+    stats_interval: 10s
+    fleet_key: pulse_dev_sk_2f7d1b9c4e8a4f60b3d5a9c1e6f80712
+
+connectors:
+  routing/traces:
+    default_pipelines: [traces/hot]
+    table:
+      - context: resource
+        condition: attributes["pulse.routing.destination"] == "cold-storage"
+        pipelines: [traces/cold]
+  routing/logs:
+    default_pipelines: [logs/hot]
+    table:
+      - context: resource
+        condition: attributes["pulse.routing.destination"] == "cold-storage"
+        pipelines: [logs/cold]
+  routing/metrics:
+    default_pipelines: [metrics/hot]
+    table:
+      - context: resource
+        condition: attributes["pulse.routing.destination"] == "cold-storage"
+        pipelines: [metrics/cold]
+
+exporters:
+  debug/hot:
+    # `basic` keeps container logs readable; raise to `detailed` when
+    # debugging payload contents.
+    verbosity: basic
+  debug/cold:
+    verbosity: basic
+
+service:
+  telemetry:
+    logs:
+      # pulse_filter emits its batch observations at debug level.
+      level: debug
+  pipelines:
+    traces/in:
+      receivers: [otlp]
+      processors: [pulse_filter]
+      exporters: [routing/traces]
+    logs/in:
+      receivers: [otlp]
+      processors: [pulse_filter]
+      exporters: [routing/logs]
+    metrics/in:
+      receivers: [otlp]
+      processors: [pulse_filter]
+      exporters: [routing/metrics]
+
+    traces/hot:
+      receivers: [routing/traces]
+      exporters: [debug/hot]
+    traces/cold:
+      receivers: [routing/traces]
+      exporters: [debug/cold]
+    logs/hot:
+      receivers: [routing/logs]
+      exporters: [debug/hot]
+    logs/cold:
+      receivers: [routing/logs]
+      exporters: [debug/cold]
+    metrics/hot:
+      receivers: [routing/metrics]
+      exporters: [debug/hot]
+    metrics/cold:
+      receivers: [routing/metrics]
+      exporters: [debug/cold]

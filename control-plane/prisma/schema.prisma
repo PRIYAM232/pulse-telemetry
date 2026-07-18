@@ -1,0 +1,133 @@
+// Pulse control plane — policy schema.
+//
+// CollectorFleet is the unit of management: a group of otelcol-pulse
+// collectors sharing one API key and one ruleset. PolicyRule rows are the
+// dynamic rules the data plane polls for (see /api/v1/policies/[fleetId]).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Enumerations are mirrored by string constants in the Go data plane
+// (data-plane/processors/filterprocessor/config.go). Keep the two in sync —
+// the wire format is the enum's literal name.
+
+enum PolicyAction {
+  DROP
+  SAMPLE
+  REDACT
+  // ROUTE never drops: the data plane stamps the matched telemetry's resource
+  // with pulse.routing.destination = targetDestination, and the collector's
+  // native routing connector forks it to the exporter registered for that
+  // destination.
+  ROUTE
+  // THROTTLE drops only what exceeds throttleRate events/sec, enforced by a
+  // per-collector token bucket partitioned on throttleGroupBy. Rate limiting,
+  // not sampling: bursts under the rate pass untouched.
+  THROTTLE
+}
+
+enum TargetSignal {
+  TRACES
+  LOGS
+  METRICS
+}
+
+enum ConditionOp {
+  EQUALS
+  GREATER_THAN
+  CONTAINS
+  EXISTS
+  // conditionValue is a Go RE2 pattern, compiled by the data plane once per
+  // ruleset sync. With REDACT, only the matched substrings are masked.
+  REGEX_MATCH
+}
+
+model CollectorFleet {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+  // Bearer token presented by collectors when polling for policies.
+  apiKey      String   @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  rules   PolicyRule[]
+  metrics FleetMetric[]
+}
+
+model PolicyRule {
+  id      String         @id @default(uuid()) @db.Uuid
+  fleetId String         @db.Uuid
+  fleet   CollectorFleet @relation(fields: [fleetId], references: [id], onDelete: Cascade)
+
+  isActive Boolean @default(true)
+  name     String
+
+  actionType PolicyAction
+  // Only meaningful for SAMPLE rules: fraction of matching telemetry to keep,
+  // in [0, 1]. NULL for DROP/REDACT/ROUTE.
+  sampleRate Float?
+  // Only meaningful for ROUTE rules: the downstream exporter identifier the
+  // routing connector keys on (e.g. "cold-storage", "premium-analytics").
+  // NULL for every other action. A ROUTE rule without one is malformed and
+  // the data plane skips it — same fail-open contract as rate-less SAMPLE.
+  targetDestination String?
+  // Only meaningful for THROTTLE rules: the token-bucket rate in events per
+  // second. NULL for every other action; a THROTTLE rule without one is
+  // malformed and the data plane skips it (fail open, like rate-less SAMPLE).
+  throttleRate Int?
+  // Only meaningful for THROTTLE rules: the attribute key whose VALUE
+  // partitions the token buckets (e.g. "tenant_id" gives each tenant its own
+  // bucket). NULL/empty means one shared bucket per rule — records missing
+  // the attribute share the rule's "default" bucket either way.
+  throttleGroupBy String?
+
+  targetSignal TargetSignal
+
+  // The condition triple: <conditionField> <conditionOp> <conditionValue>,
+  // evaluated against span attributes first, then resource attributes.
+  // conditionValue is ignored (empty string by convention) for EXISTS.
+  conditionField String
+  conditionOp    ConditionOp
+  conditionValue String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The polling endpoint always filters by fleet and the data plane only
+  // cares about active rules — index the exact access path.
+  @@index([fleetId, isActive])
+}
+
+// One heartbeat interval reported by a collector: how many spans and log
+// records it received and how many the ruleset dropped since its previous
+// successful report. Rows are interval deltas, not running totals — SUM over
+// a time window gives the totals for that window (see
+// /api/v1/telemetry/[fleetId]/stats).
+model FleetMetric {
+  id      String         @id @default(uuid()) @db.Uuid
+  fleetId String         @db.Uuid
+  fleet   CollectorFleet @relation(fields: [fleetId], references: [id], onDelete: Cascade)
+
+  tracesReceived Int
+  tracesDropped  Int
+  // Default 0 so heartbeat rows written before Phase 5 (traces-only
+  // collectors) read as "no log traffic" rather than blocking the migration.
+  logsReceived   Int @default(0)
+  logsDropped    Int @default(0)
+  // Same treatment for Phase 6: pre-metrics heartbeat rows read as "no
+  // metric traffic".
+  metricsReceived Int @default(0)
+  metricsDropped  Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  // The dashboard reads per-fleet time windows; index the exact access path.
+  @@index([fleetId, createdAt])
+}

@@ -1,0 +1,37 @@
+{{- if .Values.metrics.dashboard.enabled }}
+# Pre-built Grafana dashboard for the collector's self-telemetry, shipped as
+# a ConfigMap for Grafana's dashboard sidecar (kube-prometheus-stack enables
+# it by default): the sidecar watches for the grafana_dashboard: "1" label
+# and imports the JSON automatically — no manual Grafana provisioning.
+#
+# The JSON lives in files/pulse-collector-dashboard.json and is inlined via
+# .Files.Get, NOT authored in this template — Grafana's own {{"{{"}}pod{{"}}"}} legend
+# templating would otherwise fight Helm's delimiters. Its queries assume the
+# metric names produced by this chart's collector telemetry reader config
+# (classic collector names, no _total/unit suffixes).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-collector-dashboard
+  {{- with .Values.metrics.dashboard.namespace }}
+  # Grafana sidecars are often scoped to their own namespace; this drops the
+  # dashboard where the sidecar actually looks.
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/name: pulse-collector
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+    {{- include "pulse-telemetry.labels" . | nindent 4 }}
+    {{- with .Values.metrics.dashboard.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.metrics.dashboard.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  pulse-collector.json: |-
+{{ .Files.Get "files/pulse-collector-dashboard.json" | indent 4 }}
+{{- end }}

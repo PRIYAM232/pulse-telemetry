@@ -1,0 +1,105 @@
+# The otelcol-pulse data plane. An edge proxy in front of downstream
+# backends — a Deployment scaled by replica count, not a per-node DaemonSet.
+# pulse_filter state (policy cache, throttle buckets, stats) is per-pod;
+# each replica syncs policies and reports stats independently.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-collector
+  labels:
+    app.kubernetes.io/name: pulse-collector
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+    {{- include "pulse-telemetry.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.collector.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pulse-collector
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pulse-collector
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: collector
+      annotations:
+        # Roll the pods whenever the pipeline config changes — the collector
+        # only reads its config at startup.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-collector.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: otelcol-pulse
+          image: "{{ .Values.collector.image.repository }}:{{ .Values.collector.image.tag }}"
+          imagePullPolicy: {{ .Values.collector.image.pullPolicy }}
+          # Point at the mounted k8s config instead of the image's baked-in
+          # localhost dev default.
+          args:
+            - --config
+            - /etc/otelcol/otelcol-k8s.yaml
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            # Collector self-telemetry (Prometheus text format, /metrics) —
+            # the service.telemetry.metrics reader in the collector config.
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+          # The distro doesn't bundle the health_check extension (see
+          # data-plane/builder-config.yaml), so probe the OTLP gRPC listener:
+          # it only binds once the pipelines are built and started.
+          readinessProbe:
+            tcpSocket:
+              port: otlp-grpc
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: otlp-grpc
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.collector.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-collector-config
+---
+# OTLP entrypoint for telemetry producers. ClusterIP by default; set
+# collector.service.type=LoadBalancer to expose 4317/4318 outside the
+# cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-collector
+  labels:
+    app.kubernetes.io/name: pulse-collector
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+    {{- include "pulse-telemetry.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.collector.service.type }}
+  selector:
+    app.kubernetes.io/name: pulse-collector
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+    # Named port the ServiceMonitor's endpoint references; Prometheus
+    # resolves it through this Service's Endpoints to scrape every collector
+    # pod individually (it never scrapes through the ClusterIP itself).
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
