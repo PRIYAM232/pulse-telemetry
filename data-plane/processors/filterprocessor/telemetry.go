@@ -10,7 +10,7 @@ import (
 // meterScope names the instrumentation scope on the collector's self-telemetry
 // meter. Mirrors the module path, the same convention mdatagen uses for the
 // upstream components.
-const meterScope = "github.com/pulse-otel/pulse/data-plane/processors/filterprocessor"
+const meterScope = "github.com/PRIYAM232/pulse-telemetry/data-plane/processors/filterprocessor"
 
 // engineTelemetry publishes the engine's counters on the collector's OWN
 // telemetry pipeline (Prometheus on :8888 by default), alongside the stock

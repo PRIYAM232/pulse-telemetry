@@ -18,7 +18,7 @@ receivers:
 processors:
   # Our custom in-process filter engine. The version here is a placeholder —
   # the `replaces` directive below redirects resolution to the local path.
-  - gomod: github.com/pulse-otel/pulse/data-plane/processors/filterprocessor v0.1.0
+  - gomod: github.com/PRIYAM232/pulse-telemetry/data-plane/processors/filterprocessor v0.1.0
 
 exporters:
   - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.156.0
@@ -34,4 +34,4 @@ connectors:
 # inside `output_path` (./dist). Relative paths in a go.mod replace are
 # resolved relative to that go.mod — hence `../`, not `./`.
 replaces:
-  - github.com/pulse-otel/pulse/data-plane/processors/filterprocessor => ../processors/filterprocessor
+  - github.com/PRIYAM232/pulse-telemetry/data-plane/processors/filterprocessor => ../processors/filterprocessor
