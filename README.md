@@ -2,6 +2,7 @@
 
 **The open-source observability control plane. Shape, route, and redact telemetry data at the edge — before it hits your backend.**
 
+[![CI](https://github.com/PRIYAM232/pulse-telemetry/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/PRIYAM232/pulse-telemetry/actions/workflows/ci.yaml)
 [![OpenTelemetry Collector](https://img.shields.io/badge/OTel%20Collector-v0.156.0-blueviolet)](https://opentelemetry.io/docs/collector/)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](data-plane/)
 [![Next.js](https://img.shields.io/badge/Next.js-Control%20Plane-black?logo=next.js)](control-plane/)
