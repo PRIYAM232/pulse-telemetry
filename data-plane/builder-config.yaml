@@ -22,6 +22,12 @@ processors:
 
 exporters:
   - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.156.0
+  # OTLP out, so the proxy can forward to any real backend (Jaeger, Tempo,
+  # Prometheus' OTLP receiver, Grafana Cloud, vendor OTLP intakes) without a
+  # rebuild. Component types are otlp_grpc and otlp_http as of v0.156.0; the
+  # old otlp / otlphttp names still resolve but are deprecated aliases.
+  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.156.0
+  - gomod: go.opentelemetry.io/collector/exporter/otlphttpexporter v0.156.0
 
 connectors:
   # Native OTel routing connector (the successor to the removed `routing`

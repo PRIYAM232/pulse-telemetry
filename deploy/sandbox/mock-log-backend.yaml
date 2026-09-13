@@ -1,0 +1,63 @@
+# The sandbox's stand-in log vendor (otelcol-contrib). It sits AFTER the
+# Pulse proxy, so everything here is what a real backend would have ingested:
+#
+#   - stdout: every record, detailed — `docker logs -f pulse-sbx-log-backend`.
+#   - :8889: two counters for Prometheus, computed by the count connector:
+#       sandbox_backend_logs_total{tenant_id}      — per-tenant volume (THROTTLE)
+#       sandbox_backend_pii_leaks_total{tenant_id} — records still carrying
+#                                                    PII (REDACT)
+#
+# The leak detectors mirror what loadgen injects: an SSN, a 13-16 digit card
+# number, or an email anywhere in the body, or an unmasked user.email
+# attribute. Once the runbook's REDACT rules are live this counter flatlines.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+connectors:
+  count:
+    logs:
+      sandbox.backend.logs:
+        description: Log records received by the mock backend, per tenant.
+        attributes:
+          - key: tenant_id
+            default_value: unknown
+      sandbox.backend.pii_leaks:
+        description: Log records received with unmasked PII in the body or user.email.
+        conditions:
+          - 'IsMatch(log.body, "\\b\\d{3}-\\d{2}-\\d{4}\\b")'
+          - 'IsMatch(log.body, "\\b(?:\\d[ -]?){12,15}\\d\\b")'
+          - 'IsMatch(log.body, "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")'
+          - 'IsMatch(log.attributes["user.email"], "@")'
+        attributes:
+          - key: tenant_id
+            default_value: unknown
+
+processors:
+  # count emits DELTA sums whose windows are each batch's record timestamps.
+  # The prometheus exporter only merges deltas whose start equals the
+  # previous point's end, which these never do, so without this every batch
+  # would reset the series and rate() would read nonsense.
+  deltatocumulative: {}
+
+exporters:
+  debug:
+    verbosity: detailed
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [debug, count]
+    metrics/counts:
+      receivers: [count]
+      processors: [deltatocumulative]
+      exporters: [prometheus]

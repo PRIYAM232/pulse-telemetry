@@ -121,7 +121,9 @@ In the dashboard, create a **DROP** rule for the dev fleet (for example: traces 
 
 The collector reports match/drop statistics back to the Control Plane every 10 seconds. The dashboard's telemetry view shows exactly what each rule is catching — that's your cost reduction, live, without touching a single YAML file or restarting a single process.
 
-> **Shipping to a real backend:** the packaged dev pipeline terminates in the `debug` exporter so you can see everything working. To export to Datadog, Grafana Cloud, or any OTLP endpoint, add the exporter to [`data-plane/builder-config.yaml`](data-plane/builder-config.yaml), rebuild with `make build`, and reference it in your collector config's `hot`/`cold` pipelines.
+> **Shipping to a real backend:** the packaged dev pipeline terminates in the `debug` exporter so you can see everything working. The distribution also ships the `otlp_grpc` and `otlp_http` exporters, so any OTLP endpoint (Jaeger, Tempo, Prometheus, Grafana Cloud, vendor OTLP intakes) is a config change in your collector's `hot`/`cold` pipelines — see [`deploy/sandbox/otelcol-sandbox.yaml`](deploy/sandbox/otelcol-sandbox.yaml). For vendor-specific exporters, add them to [`data-plane/builder-config.yaml`](data-plane/builder-config.yaml) and rebuild with `make build`.
+>
+> **Live REDACT/THROTTLE demo:** [`deploy/sandbox/`](deploy/sandbox/README.md) runs the full stack against real Jaeger and Prometheus backends with a noisy, PII-laden synthetic workload.
 
 ---
 

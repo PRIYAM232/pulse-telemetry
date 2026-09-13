@@ -1,0 +1,23 @@
+# Sandbox Prometheus. Two ways data arrives:
+#   - OTLP push (--web.enable-otlp-receiver): loadgen's app metrics, forwarded
+#     by the Pulse proxy's metrics/hot pipeline.
+#   - Scrapes: the proxy's self-metrics and the mock log backend's counters.
+
+global:
+  # Fast enough that a rule change shows up on a rate([30s]) graph within
+  # a couple of scrapes.
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+storage:
+  tsdb:
+    # OTLP pushes can land slightly out of order; recommended for OTLP intake.
+    out_of_order_time_window: 30m
+
+scrape_configs:
+  - job_name: pulse-proxy
+    static_configs:
+      - targets: ["otelcol-pulse:8888"]
+  - job_name: mock-log-backend
+    static_configs:
+      - targets: ["mock-log-backend:8889"]
