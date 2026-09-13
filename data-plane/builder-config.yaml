@@ -41,3 +41,11 @@ connectors:
 # resolved relative to that go.mod — hence `../`, not `./`.
 replaces:
   - github.com/PRIYAM232/pulse-telemetry/data-plane/processors/filterprocessor => ../processors/filterprocessor
+  # Security floor for gRPC. The v0.156.0 modules resolve
+  # google.golang.org/grpc v1.82.0, which exposes every gRPC-Go server (here,
+  # the OTLP receiver on :4317) to two unauthenticated remote DoS advisories:
+  # GHSA-vp52-pcj8-j9qc (OOM via fragmented HTTP/2 DATA frames, fixed in
+  # 1.83.1) and GHSA-hrxh-6v49-42gf (HTTP/2 Rapid Reset mitigation bypass,
+  # fixed in 1.82.1). Remove once the collector release line requires
+  # >= 1.83.1 itself; `go version -m dist/otelcol-pulse` shows what shipped.
+  - google.golang.org/grpc => google.golang.org/grpc v1.83.2
