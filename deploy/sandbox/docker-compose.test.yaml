@@ -1,0 +1,164 @@
+# Pulse sandbox — a production-like local rig for exercising REDACT and
+# THROTTLE rules live, with real backends on the far side of the proxy.
+# Runbook: deploy/sandbox/README.md. From the repo root:
+#
+#   docker compose -f deploy/sandbox/docker-compose.test.yaml up -d --build
+#
+#   loadgen ──OTLP──► otelcol-pulse ──► jaeger             (traces)
+#                        │  ▲        ├─► prometheus         (metrics, via OTLP)
+#                        │  │        └─► mock-log-backend   (logs → stdout)
+#          rules (poll)  ▼  │ stats
+#                     control-plane ── postgres
+#
+# Prometheus also scrapes the proxy's self-metrics (:8888) and the log
+# backend's per-tenant / PII-leak counters, so volume and leaks are graphable.
+#
+# Host ports bind 127.0.0.1 only — the control plane has no operator auth —
+# and every one is overridable, e.g. PULSE_UI_PORT=3100 when a dev server
+# already owns :3000.
+
+name: pulse-sandbox
+
+services:
+  # --- Control plane -----------------------------------------------------------
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulse-sbx-postgres
+    environment:
+      POSTGRES_USER: pulse
+      POSTGRES_PASSWORD: pulse
+      POSTGRES_DB: pulse_control
+    # No host port: only the control plane talks to it.
+    volumes:
+      - pulse-sbx-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulse -d pulse_control"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: migrations, then the deterministic dev fleet whose ID/key are
+  # wired into otelcol-sandbox.yaml.
+  control-plane-migrate:
+    build:
+      context: ../../control-plane
+      target: builder
+    container_name: pulse-sbx-control-plane-migrate
+    environment:
+      DATABASE_URL: postgresql://pulse:pulse@postgres:5432/pulse_control?schema=public
+    command: sh -c "npx prisma migrate deploy && npx prisma db seed"
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  control-plane:
+    build:
+      context: ../../control-plane
+      target: runner
+    container_name: pulse-sbx-control-plane
+    environment:
+      DATABASE_URL: postgresql://pulse:pulse@postgres:5432/pulse_control?schema=public
+    ports:
+      - "127.0.0.1:${PULSE_UI_PORT:-3000}:3000" # dashboard + policy/stats APIs
+    depends_on:
+      control-plane-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # --- Data plane --------------------------------------------------------------
+
+  # The same image the packaged stack ships; only the config differs. No
+  # restart policy on purpose: RestartCount/StartedAt are how the runbook
+  # proves rule changes land without a restart.
+  otelcol-pulse:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.collector
+    container_name: pulse-sbx-otelcol
+    ports:
+      - "127.0.0.1:${OTLP_GRPC_PORT:-4317}:4317" # OTLP gRPC ingest
+      - "127.0.0.1:${OTLP_HTTP_PORT:-4318}:4318" # OTLP HTTP ingest
+      - "127.0.0.1:${PROXY_METRICS_PORT:-8888}:8888" # self-metrics
+    volumes:
+      - ./otelcol-sandbox.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+      prometheus:
+        condition: service_started
+      mock-log-backend:
+        condition: service_started
+
+  # --- Mock destination backends ------------------------------------------------
+
+  # Jaeger v2 — the maintained successor to jaegertracing/all-in-one (v1 was
+  # retired at 1.76.0). Its default config IS the all-in-one: in-memory
+  # storage, OTLP on 4317/4318, UI on 16686.
+  jaeger:
+    image: jaegertracing/jaeger:2.20.0
+    container_name: pulse-sbx-jaeger
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    container_name: pulse-sbx-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+      # Accept OTLP pushes at /api/v1/otlp/v1/metrics — the proxy's metrics
+      # pipeline exports here, exactly as it would to a hosted backend.
+      - --web.enable-otlp-receiver
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+
+  # Stands in for a log vendor: prints every record it receives (detailed) and
+  # counts records per tenant and records still carrying PII.
+  mock-log-backend:
+    image: otel/opentelemetry-collector-contrib:0.156.0
+    container_name: pulse-sbx-log-backend
+    volumes:
+      - ./mock-log-backend.yaml:/etc/otelcol-contrib/config.yaml:ro
+    # Detailed output at the default noisy rate is ~1 MB/s of container logs.
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "3"
+
+  # --- Workload ----------------------------------------------------------------
+
+  loadgen:
+    build:
+      context: ./loadgen
+    container_name: pulse-sbx-loadgen
+    environment:
+      OTLP_ENDPOINT: otelcol-pulse:4317
+      NOISY_RATE: ${NOISY_RATE:-500}
+      TENANT_RATE: ${TENANT_RATE:-5}
+      TRACE_RATE: ${TRACE_RATE:-1}
+    depends_on:
+      otelcol-pulse:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pulse-sbx-pgdata:
