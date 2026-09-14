@@ -14,6 +14,12 @@
 FROM node:24-alpine AS builder
 WORKDIR /app
 
+# Take Alpine security fixes the base image hasn't been rebuilt with yet
+# (e.g. OpenSSL 3.5.8-r0 for CVE-2026-14456 while node:24-alpine still ships
+# 3.5.7-r0). BuildKit caches this layer per base-image digest, so later
+# fixes land when node:24-alpine is republished or the build cache is cleared.
+RUN apk upgrade --no-cache
+
 COPY package.json package-lock.json ./
 RUN npm ci
 
@@ -34,6 +40,14 @@ RUN npm run build
 
 FROM node:24-alpine AS runner
 WORKDIR /app
+
+# Same Alpine fixes as the builder, and no npm: the runtime only ever runs
+# `node server.js`, while npm's bundled tar, brace-expansion and ip-address
+# carry HIGH advisories (still unpatched in npm 12.0.2). The migrator
+# (builder stage) keeps npm because migrations run through `npx prisma`.
+RUN apk upgrade --no-cache \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+
 ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
