@@ -140,6 +140,47 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
 
+      # Report-only pass over HIGH and CRITICAL. The gate below blocks only on
+      # CRITICAL, which let two HIGH remote-DoS gRPC advisories ship in
+      # otelcol-pulse unnoticed (fixed in #4). Findings land in the job
+      # summary plus a warning annotation on the PR, and never fail the
+      # build. Runs before the gate so the report exists even when the gate
+      # fails. Same SHA pin as the gate (see below).
+      - name: Report HIGH and CRITICAL CVEs (non-blocking)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: pulse-ci/${{ matrix.image }}:${{ github.sha }}
+          format: json
+          output: trivy-report.json
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+
+      - name: Summarize findings
+        continue-on-error: true
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          if [ ! -s trivy-report.json ]; then
+            echo "::warning title=Trivy (${IMAGE})::report missing, see the scan step log"
+            exit 0
+          fi
+          count=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-report.json)
+          {
+            echo "### Trivy: ${IMAGE} has ${count} HIGH/CRITICAL finding(s)"
+            if [ "$count" -gt 0 ]; then
+              echo
+              echo "| Severity | Package | Installed | Fixed in | ID |"
+              echo "|---|---|---|---|---|"
+              jq -r '[.Results[]?.Vulnerabilities[]?] | sort_by(.Severity, .PkgName)[]
+                | "| \(.Severity) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion // "no fix yet") | [\(.VulnerabilityID)](\(.PrimaryURL // "https://avd.aquasec.com/nvd/\(.VulnerabilityID | ascii_downcase)")) |"' trivy-report.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$count" -gt 0 ]; then
+            echo "::warning title=Trivy (${IMAGE})::${count} HIGH/CRITICAL vulnerabilities, see the job summary"
+          fi
+
       # Pinned to the v0.36.0 commit SHA, not the tag: trivy-action's mutable
       # tags (0.0.1–0.34.2) were compromised via imposter commits in March
       # 2026. SHA pins are immutable; bump them deliberately.
