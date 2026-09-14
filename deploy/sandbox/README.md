@@ -226,9 +226,85 @@ docker inspect -f '{{.State.StartedAt}} restarts={{.RestartCount}}' pulse-sbx-ot
 | Rule click → enforced | — | ~2.5s |
 | Proxy `RestartCount` | 0 | 0 |
 
+## 6. Try the other rule types
+
+Four more rules, each covering a path the step 4 rules don't: DROP on logs, SAMPLE on traces, ROUTE, and a rule on the metrics signal. Add them with the step 4 rules still in place, and keep the `ruleset updated` command from step 4 running.
+
+| # | Name | Action | Signal | Condition field | Operator | Value | Extra |
+|---|---|---|---|---|---|---|---|
+| 5 | `drop-debug-logs` | DROP | LOGS | `log.severity` | EQUALS | `DEBUG` | — |
+| 6 | `sample-initech-traces` | SAMPLE | TRACES | `tenant_id` | EQUALS | `initech` | Sample rate `0.25` |
+| 7 | `route-acme-logs-cold` | ROUTE | LOGS | `tenant_id` | EQUALS | `acme` | Route to destination `cold-storage` |
+| 8 | `drop-cache-miss-metric` | DROP | METRICS | `metric.name` | EQUALS | `search.cache.misses` | — |
+
+How these behave:
+- **Rules run oldest first, on every record.** DROP ends evaluation, THROTTLE spends a token and drops the excess, and REDACT and ROUTE modify the record and continue. So rule 5 drops the 50/s of globex that rule 4 let through.
+- **SAMPLE applies to traces only** and decides by trace ID, so a trace is kept or dropped whole. The rate is the fraction kept.
+- **ROUTE never drops.** It stamps the record's resource with `pulse.routing.destination`, and the collector's routing connector sends that resource to the matching pipeline. In this sandbox, `cold-storage` is the proxy's own `debug/cold` exporter.
+- **A METRICS condition sees `metric.name` and resource attributes**, never datapoint attributes such as `tenant_id`.
+
+`rules_total` should climb 7 → 11, ending at:
+
+```text
+"rules_total": 11, "rules_enforced_traces": 5, "rules_enforced_logs": 5, "rules_enforced_metrics": 1, "rules_ignored": 0
+```
+
+Wait about 70s before checking. The queries below use 1-minute windows because traces arrive at only 1/s per tenant. Paste them into **http://localhost:9090/query**.
+
+**Rule 5: DEBUG logs dropped.** In the step 2 panels, globex goes **50 → 0** and the drop fraction goes **0.88 → 0.98** (500 of 510 logs/s). This rule leaves acme and initech alone.
+
+**Rule 6: initech traces sampled.** Spans dropped per second should be about **2.25** (3 initech spans/s × 0.75):
+
+```text
+sum(rate(otelcol_pulse_filter_spans_dropped[1m]))
+```
+
+In Jaeger, search `payments-api` with Tags `tenant_id=initech`. New initech traces appear about a quarter as often as acme's, and each one still has all 3 spans.
+
+**Rule 7: acme logs routed, not dropped.** Count records per tenant reaching the log backend in 5s:
+
+```bash
+for t in acme initech globex; do echo "$t=$(docker logs --since 5s pulse-sbx-log-backend 2>&1 | grep -c "tenant_id: Str($t)")"; done
+```
+
+Expect `acme=0`, `initech=25`, `globex=0`. acme now lands in cold storage instead:
+
+```bash
+docker logs --since 10s pulse-sbx-otelcol 2>&1 | grep 'debug/cold' | tail -3
+```
+
+Each line reads `"otelcol.component.id": "debug/cold" … "log records": 1`. The proxy's logs dropped/s stays at exactly 500 (all of globex), because routed records aren't drops.
+
+**Rule 8: one metric dropped.** The proxy drops one metric every 5s, so this should read **0.20**:
+
+```text
+sum(rate(otelcol_pulse_filter_metrics_dropped[1m]))
+```
+
+`search_cache_misses_total` stops receiving samples, so its age keeps growing until the series goes stale at 5 minutes and the query returns nothing. `payments_requests_total` keeps updating.
+
+```text
+time() - max(timestamp(search_cache_misses_total))
+```
+
+### Reference run (2026-09-14)
+
+| Check | Before | After |
+|---|---|---|
+| Backend logs/s — globex / acme / initech | 50 / 5 / 5 | 0 / 0 / 5 |
+| Proxy logs received / dropped per s | 510 / 450 | 510 / 500 |
+| Proxy spans received / dropped per s | 6 / 0 | 6 / 2.29 |
+| Traces per minute in Jaeger — acme / initech | 60 / 60 | 60 / 15 (45 spans) |
+| Proxy metrics received / dropped per s | 0.40 / 0 | 0.40 / 0.20 |
+| `search_cache_misses_total` increase over 1m | ~30,000 | none (last sample 75s old) |
+| Rules saved → enforced | — | ~4.6s |
+| Proxy `RestartCount` | 0 | 0 |
+
 ---
 
 ## Going further
+
+These assume only the step 4 rules. If you did step 6, pause `drop-debug-logs` first, or globex stays at 0.
 
 - **Pause/resume**: click **Pause** on `throttle-noisy-tenants`. globex returns to 500/s on the next poll, and resuming clamps it again. Buckets restart full on every ruleset change, so expect one short burst.
 - **Tenant isolation under pressure**: raise the noisy tenant's rate. globex stays at 50/s at the backend while acme and initech don't move.
@@ -274,5 +350,6 @@ docker compose down -v
 |---|---|
 | `Bind for 0.0.0.0:4317 failed: port is already allocated` | Another stack owns the port. See step 0. |
 | Dashboard says **No heartbeat yet** | The proxy isn't running: `docker logs pulse-sbx-otelcol`. |
-| Rule saved but nothing changes | Check the `ruleset updated` line. `rules_ignored > 0` means a rule can't be enforced (e.g. REDACT on METRICS). A regex Go's RE2 rejects (lookarounds, backreferences) logs `REGEX_MATCH pattern does not compile` and fails open. |
+| Rule saved but nothing changes | Check the `ruleset updated` line. `rules_ignored > 0` means a rule can't be enforced (e.g. REDACT on METRICS, or SAMPLE on LOGS). A regex Go's RE2 rejects (lookarounds, backreferences) logs `REGEX_MATCH pattern does not compile` and fails open. |
+| ROUTE rule enforced but the data still reaches the backend | The destination must exactly match a value in the collector's routing tables. This sandbox only wires `cold-storage` (the `routing/*` connectors in `otelcol-sandbox.yaml`); any other value falls through to the default hot pipeline. |
 | `sandbox_backend_*` graphs empty | The mock backend only exposes a series after its first log arrives. Check `docker logs pulse-sbx-loadgen` for `export_errors`. |
