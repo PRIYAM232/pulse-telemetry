@@ -136,6 +136,12 @@ INSERT INTO payments (customer_email, card_number, amount) VALUES ('wei.chen@exa
 | PII-bearing logs/s reaching the backend | `sum by (tenant_id) (rate(sandbox_backend_pii_leaks_total[30s]))` | acme ≈ 5, initech ≈ 5 |
 | Fraction of logs the proxy drops | `rate(otelcol_pulse_filter_logs_dropped[30s]) / rate(otelcol_pulse_filter_logs_received[30s])` | 0 |
 
+The third panel shows `PromQL info: metric might not be a counter, name does not end in _total/_sum/_count/_bucket`. You can ignore it. Prometheus guesses counters from the metric name alone. The proxy's `otelcol_pulse_filter_*` series are counters, exported without the `_total` suffix on purpose (`without_type_suffix` in `otelcol-sandbox.yaml`) so they keep the classic collector names the Helm chart's Grafana dashboard queries. To confirm the type:
+
+```bash
+curl -s localhost:8888/metrics | grep '^# TYPE otelcol_pulse_filter'
+```
+
 ## 3. Open the Pulse control plane
 
 Open **http://localhost:3000/dashboard**. You should see fleet `local-dev-fleet`, a green **Collector online** badge (stats heartbeat every 10s), and the 3 seeded rules.
