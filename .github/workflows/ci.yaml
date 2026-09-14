@@ -1,7 +1,8 @@
 # Pulse CI — validation for pull requests and pushes to main.
 #
-# Five independent jobs, one per surface:
-#   data-plane      — race-enabled unit tests for the pulse_filter engine
+# Six independent jobs, one per surface:
+#   go              — vet, gofmt and race-enabled tests for every Go module:
+#                     the pulse_filter engine and the sandbox load generator
 #   collector-build — assembles the otelcol-pulse distro with ocb, proving
 #                     builder-config.yaml and the processor still compose
 #   control-plane   — ESLint + Prisma schema validation
@@ -9,6 +10,8 @@
 #                     monitoring toggles on, so gated templates can't rot
 #   image-scan      — builds the three release images and fails on CRITICAL
 #                     CVEs (Trivy), so a vulnerable base never reaches a tag
+#   sandbox-image   — build-only check of the local loadgen image (never
+#                     published, so no Trivy gate and no release.yaml entry)
 name: CI
 
 on:
@@ -26,20 +29,41 @@ env:
   OCB_VERSION: v0.156.0
 
 jobs:
-  data-plane:
-    name: Data plane (go test -race)
+  go:
+    name: Go ${{ matrix.module }} (vet + gofmt + test -race)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # One entry per go.mod in the repo — each module has its own go.sum,
+      # so each gets its own working directory and module cache key.
+      matrix:
+        include:
+          - module: filterprocessor
+            dir: data-plane/processors/filterprocessor
+          # The sandbox load generator. Its pii_test.go pins the REDACT
+          # pattern documented in deploy/sandbox/README.md against every PII
+          # shape the generator emits, so drift in either side fails here.
+          - module: loadgen
+            dir: deploy/sandbox/loadgen
     defaults:
       run:
-        working-directory: data-plane/processors/filterprocessor
+        working-directory: ${{ matrix.dir }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
-          cache-dependency-path: data-plane/processors/filterprocessor/go.sum
+          cache-dependency-path: ${{ matrix.dir }}/go.sum
       - name: go vet
         run: go vet ./...
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt -l reports unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
       - name: go test -race
         run: go test -race ./...
 
@@ -197,3 +221,23 @@ jobs:
           # no patched package yet still blocks until we swap the base or
           # explicitly .trivyignore it with a rationale.
           exit-code: "1"
+
+  sandbox-image:
+    name: loadgen image (build only)
+    runs-on: ubuntu-latest
+    # Deliberately NOT in image-scan's matrix: that matrix mirrors
+    # release.yaml, and loadgen is a local-only sandbox tool that is never
+    # pushed or tagged. This only proves the Dockerfile still builds.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/sandbox/loadgen
+          file: deploy/sandbox/loadgen/Dockerfile
+          push: false
+          cache-from: type=gha,scope=loadgen
+          cache-to: type=gha,scope=loadgen,mode=max
